@@ -1,0 +1,404 @@
+---
+author: "Emma Delaporte"
+date: "4/30/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library('openssl')
+library('httpuv')
+library('jsonlite')
+library('dplyr')
+library('quanteda')
+library('wordcloud')
+library('RColorBrewer')
+```
+
+**Create a function to get tweets**
+```{r}
+#set the parameters
+tweets_params <- list(
+  `tweet.fields` = 'text,created_at',
+  #exclude retweets/replies
+  # `exclude` = 'retweets',
+  `max_results` = 100
+)
+
+#set tokens
+Sys.setenv(BEARER_TOKEN = "AAAAAAAAAAAAAAAAAAAAAAD2bwEAAAAAw996QpUhBx0ywniZez6nXzZDhfc%3DmWcjcezQFSXfXVAl5tS3djAQYHkBY4vAL9XRBa2xIO4pRUawIP")
+require(httr)
+require(jsonlite)
+require(dplyr)
+
+#build the function
+get_tweets <- function (username) {
+  bearer_token <- Sys.getenv("BEARER_TOKEN")
+  headers <- c(`Authorization` = sprintf('Bearer %s', bearer_token))
+  
+  user_response <- httr::GET(
+    url = sprintf("https://api.twitter.com/2/users/by/username/%s", username),
+    httr::add_headers(.headers = headers)
+  )
+  obj <- httr::content(user_response, as = "text")
+  data <- fromJSON(obj, flatten = TRUE)
+  user_id <- data$data$id
+  print(sprintf('user ID: %s', user_id))
+  
+  tweets_url <- sprintf('https://api.twitter.com/2/users/%s/tweets', user_id)
+  
+  get_tweets_base <- function (pagination_token = NULL) {
+    if (!is.null(pagination_token)) {
+      tweets_params$pagination_token <- pagination_token
+    }
+    
+    response <- httr::GET(
+      url = tweets_url,
+      httr::add_headers(.headers = headers),
+      query = tweets_params
+    )
+    obj <- httr::content(response, as = "text")
+    data <- fromJSON(obj, flatten = TRUE)
+    
+    tweets <- as.data.frame(data$data)
+    print(sprintf('got %s more tweets', nrow(tweets)))
+    
+    next_token <- data$meta$next_token
+    if (!is.null(next_token)) {
+      next_tweets <- get_tweets_base(next_token)
+      tweets <- rbind(tweets, next_tweets)
+    }
+    
+    return(tweets)
+  }
+  
+  return(get_tweets_base())
+}
+```
+
+
+
+```{r}
+
+#alphabet workers
+all_tweets <- get_tweets('AlphabetWorkers')
+#insert union name
+all_tweets$union <- "alphabet"
+
+#Big Cartel Union
+bc_tweets <- get_tweets('bcworkersunion')
+bc_tweets$union <- "bigcartel"
+
+#Code For America Union
+cfa_tweets <- get_tweets('CfAWorkers')
+cfa_tweets$union <- "cfa"
+
+#Kichstarter Union
+kick_tweets <- get_tweets('ksr_united')
+kick_tweets$union <- "kickstarter"
+
+#Code CWA tweets
+cwa_tweets <- get_tweets('CODE_CWA')
+cwa_tweets$union <- "cwa"
+
+#Mapbox workers union
+mapbox_tweets <- get_tweets('MapboxUnion')
+mapbox_tweets$union <- "mapbox"
+
+#NPR digital media united
+dmu_tweets <- get_tweets('WeBuildNPR')
+dmu_tweets$union <- "digitalmedianpr"
+
+#activison blizzard
+abk_tweets <- get_tweets('ABetterABK')
+abk_tweets$union <- "actiblizzard"
+
+#medium
+medium_tweets <- get_tweets('mediumworkers')
+medium_tweets$union <- "medium"
+
+#blue state
+bluestate_tweets <- get_tweets('BlueStateU')
+bluestate_tweets$union <- "bluestate"
+
+#nyt tech
+nyt_tech_tweets <- get_tweets('NYTGuildTech')
+nyt_tech_tweets$union <- "nyt_tech"
+
+#paizo
+paizo_tweets <- get_tweets('PaizoWorkers')
+paizo_tweets$union <- "paizo"
+```
+
+```{r warning=FALSE}
+#combine the tech unions ( i need to clean this up lol)
+
+techtweets <- do.call("rbind", list(
+  all_tweets,
+  bc_tweets,
+  cfa_tweets,
+  kick_tweets,
+  cwa_tweets,
+  mapbox_tweets,
+  dmu_tweets,
+  abk_tweets,
+  medium_tweets,
+  bluestate_tweets,
+  nyt_tech_tweets,
+  paizo_tweets
+))
+
+#write.csv(techtweets, "techtweets.csv")
+
+#description of the corpus
+
+library(epiDisplay)
+tab1(techtweets$union, descending = TRUE, cum.percent = TRUE)
+
+#mean length of tweet
+mean(nchar(techtweets$text))
+
+#proportion of retweets to tweets
+table(techtweets$RT)
+
+
+```
+
+**Export the dataset for labeling**
+```{r}
+#sampling data for testing
+#techsample <- techtweets[sample(nrow(techtweets), 300),]
+#WriteXLS(techsample, "techsample.xls")
+
+#importing the manually labeled test data 
+techsample <- read.csv("techsample.csv")
+
+```
+
+**Data Processing**
+```{r}
+library(stringr)
+
+#I'm creating a dummy variable for retweets so that 'RT' isn't picked up as a work but is also separable from the data
+techtweets$RT <- grepl("^RT @\\w+: ", techtweets$text)
+
+# Now I'm removing RT from the tweets
+techtweets$text <- str_remove(techtweets$text, "^RT @\\w+: ")
+
+#Now I'm removing twitter handles
+techtweets$text <- str_remove_all(techtweets$text, "@\\w+")
+
+#Remove hyperlinks
+techtweets$text <- str_replace_all(techtweets$text, "https://t.co/[a-z,A-Z,0-9]*","")
+
+#remove apostrophes and letters following them
+techtweets$text <- gsub("['’]\\w+", "", techtweets$text)
+
+#Remove punctuation expect apostrophe
+techtweets$text <- gsub("[[:punct:]]", " ", techtweets$text) 
+#techtweets$text <-gsub("(?!')[[:punct:]]", "", techtweets$text, perl=TRUE)
+
+
+#remove problematic ampersand
+techtweets$text <- gsub("amp", " ", techtweets$text) 
+
+#remove blank spaces at beginnings of tweets
+techtweets$text <- gsub("^ ", "", techtweets$text)
+
+#remove non-text symbols
+techtweets$text <- iconv(techtweets$text, to = "ASCII", sub = " ")
+
+
+#Manual cleaning after inspecting the data
+
+#change U S into USA for sake of clarity
+techtweets$text <- gsub("U S ", " USA ",techtweets$text)
+
+#removing 'w' (which)
+techtweets$text <- gsub(" w ", "", techtweets$text)
+
+#removing 't' (leftover from hyperlinks)
+techtweets$text <- gsub(" t ", "", techtweets$text)
+```
+
+*Further Cleaning and exploratory analysis*
+```{r}
+library(quanteda.textplots)
+library(tm)
+library(textstem)
+
+tech_corp <- corpus(techtweets)
+
+tech_toks <- quanteda::tokens(tech_corp, remove_numbers = TRUE, remove_symbols = TRUE)
+tech_toks <- tokens_tolower(tech_toks)
+tech_toks <- tokens_wordstem(tech_toks, language = "en")
+tech_toks <- quanteda::tokens(tech_toks, remove_punct = TRUE)
+
+
+tech_dfm <- dfm(tech_toks, remove = stopwords("english"))
+
+textplot_wordcloud(tech_dfm, min_count = 15)
+
+
+#Checking word frequency
+```
+
+*Testing out some topic models*
+```{r}
+library(ldatuning)
+library(topicmodels)
+
+#convert quanteda object to topic model object
+lda_tech <- convert(tech_dfm, to="topicmodels")
+
+#suggestion for a good number of topics
+topnums <- FindTopicsNumber(
+  lda_tech,
+  topics = seq(from = 2, to = 20, by = 1),
+  metrics = c( "CaoJuan2009"),
+  method = "Gibbs",
+  control = list(seed = 21),
+  verbose = TRUE
+)
+
+topnums
+
+#from these results i'll try 5 and 11
+
+```
+
+
+
+
+```{r}
+topicMod_LDA <- LDA(lda_tech, 6, method="Gibbs", control=list(seed = 500, verbose = 25))
+
+topic_cats <- terms(topicMod_LDA, 30)
+
+topic_cats
+```
+*I need to figure out whats up with the 't' and 's' (theyre getting seperated by apostrophe)*
+*also should i use tf-idf weights?*
+
+
+*calculate the distribution of categories and assign categories to tweets*
+```{r}
+
+#proportion of topics for each tweet
+LDA_theta <- posterior(topicMod_LDA)$topics
+LDA_theta_df <- as.data.frame(LDA_theta)
+
+
+
+
+
+#get theta for topics 
+
+cols <- c("theta1", "theta2", "theta3", "theta4", "theta5", "theta6")
+
+  for (idx in 1:nrow(techtweets)) {
+    textName <- paste("text", idx, sep = "")
+   for (i in 1:ncol(LDA_theta)){
+     colname <- paste("theta",i, sep="")
+     techtweets[idx,colname] <- LDA_theta[,i][textName]
+   }
+  }
+
+##maybe ryan can help me 
+theta_idx <- c()
+techtweets$topic_cat
+#assign categories to tweets
+for (idx in 1:nrow(techtweets)) {
+  theta_idx <- techtweets[,6:11]
+  techtweets$topic_cat <- techtweets %>%
+    mutate(topic_cat = which.max(theta_idx[idx,]))
+}
+
+
+
+
+```
+
+**Alternatively, trying bi-term topic models to see if they improve anything**
+
+```{r}
+library('BTM')
+library('udpipe')
+library(data.table)
+library(stopwords)
+
+#annotate terms in the tweets. FIGURE OUT WHAT TRACE MEANSLATER
+tagged_tech <- udpipe(techtweets$text, "english", trace = 10)
+
+biterms <- as.data.table(tagged_tech)
+
+biterms <- biterms[, cooccurrence(x = lemma,
+                                  relevant = upos %in% c("NOUN", "ADJ", "VERB") & 
+                                             nchar(lemma) > 2 & !lemma %in% stopwords("en"),
+                                  skipgram = 3),
+                   by = list(doc_id)]
+
+```
+
+**Build Biterm topic model with five topics**
+```{r}
+set.seed(1234)
+traindata <- subset(tagged_tech, upos %in% c("NOUN", "ADJ", "VERB") & !lemma %in% stopwords("en") & nchar(lemma) > 2)
+traindata <- traindata[, c("doc_id", "lemma")]
+bit_model     <- BTM(traindata, biterms = biterms, k = 5, iter = 2000, background = TRUE, trace = 100)
+
+#inspect the model 
+#topic frequency
+bit_model$theta
+#there appears to be one topic that takes up the vast majority of tweets (79%!)
+
+topicterms <- terms(bit_model, top_n = 30)
+topicterms
+
+#Visualize the model
+library(textplot)
+library(ggraph)
+library(concaveman)
+plot(bit_model)
+
+#assign bi term topics to tweets
+bit_tops <- predict(bit_model, traindata)
+
+bi_cols <- c("bit1", "bit2", "bit3", "bit4", "bit5")
+
+  for (idx in 1:nrow(techtweets)) {
+    textName <- paste("doc", idx, sep = "")
+   for (i in 1:ncol(bit_tops)){
+     colname <- paste("bit",i, sep="")
+     techtweets[idx,colname] <- bit_tops[,i][textName]
+   }
+  }
+```
+
+
+*Compare the distribution of themes in the testing data, biterm model and LDA model*
+```{r}
+#The categories that I have created manually, using grounded-theory thematic analysis from the sample data, are the following"
+  #Solidarity
+  #Diversity and sociopolitical issues
+  #employer misconduct and worker protection
+  #collective bargaining/ pay and benefits 
+  #other (everything that doesn't fit) 
+
+#view distribution of samples
+techsample <- read.csv("techsample_label.csv")
+
+library(dplyr)
+catfreq <- techsample %>%
+  group_by(category) %>%
+  summarise(counts = n())
+
+library(epiDisplay)
+tab1(techsample$category, cum.percent = TRUE)
+
+```
+*The results of my manual labeling of a sample of the data show that solidarity is by far the most prevalent topic, at 44% of the data, followed by the "employer misconduct and worker protection" and "other" category at 15%*
+
